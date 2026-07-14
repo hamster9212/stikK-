@@ -1,0 +1,10 @@
+{
+  "name": "박준영의 책임 원장",
+  "short_name": "책임 원장",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#17201b",
+  "theme_color": "#1f5b42",
+  "lang": "ko",
+  "icons": []
+}
