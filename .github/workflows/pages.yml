@@ -25,7 +25,9 @@ jobs:
       - run: npm ci
       - run: npm run build
       - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - name: Verify Pages entry file
+        run: test -f dist/client/index.html
+      - uses: actions/upload-pages-artifact@v4
         with:
           path: dist/client
       - id: deployment

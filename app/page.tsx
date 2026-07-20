@@ -42,7 +42,7 @@ export default function Home() {
   useEffect(() => { if (ready) localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...state, unlocked: false })); }, [state, ready]);
   useEffect(() => {
     if (!ready || !state.startedAt) return;
-    navigator.serviceWorker?.register("/sw.js").catch(() => undefined);
+    navigator.serviceWorker?.register("/stikK-/sw.js", { scope: "/stikK-/" }).catch(() => undefined);
     const current = new Date();
     if (current.getHours() < 3) return;
     const previous = new Date(current); previous.setDate(previous.getDate() - 1);
