@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable react-hooks/set-state-in-effect */
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
@@ -11,12 +12,21 @@ type RecordItem = {
 };
 type Audit = { id: string; at: string; action: string; recordId?: string; summary: string };
 type BlogPost = { id: string; date: string; title: string; body: string; published: boolean };
-type AppState = { records: RecordItem[]; audits: Audit[]; posts: BlogPost[]; pinHash: string; unlocked: boolean; startedAt?: string };
+type Level = "상" | "중" | "하";
+type Condition = { focus: Level; tension: Level; noise: Level };
+type EmergencySession = {
+  id:string; startedAt:string; deadlineAt:string; task:string; before:Condition; after?:Condition;
+  stage:"relax"|"video"|"focus"|"after"|"complete"|"failed";
+  relaxStartedAt?:string; relaxCompletedAt?:string; videoHash?:string; videoName?:string;
+  videoDuration?:number; visibilityRatio?:number; regularity?:number; focusStartedAt?:string;
+  focusCompletedAt?:string; completedAt?:string; failureReason?:string;
+};
+type AppState = { records: RecordItem[]; audits: Audit[]; posts: BlogPost[]; emergency:EmergencySession[]; pinHash: string; unlocked: boolean; startedAt?: string };
 
 const PARTS = ["Part 2", "Part 3", "Part 4", "Part 5", "Part 7", "단어", "실전 모의고사"];
 const TARGETS: Record<string, number> = { "Part 2": 2, "Part 3": 2, "Part 4": 2, "Part 5": 3, "Part 7": 3, "단어": 6, "실전 모의고사": 1 };
 const STORAGE_KEY = "junyoung-referee-v1";
-const initial: AppState = { records: [], audits: [], posts: [], pinHash: "", unlocked: false };
+const initial: AppState = { records: [], audits: [], posts: [], emergency: [], pinHash: "", unlocked: false };
 
 function nowKst() { return new Date().toLocaleString("sv-SE", { timeZone: "Asia/Seoul" }).replace(" ", "T"); }
 function kstDate() { return nowKst().slice(0, 10); }
@@ -38,7 +48,7 @@ export default function Home() {
   const [pin, setPin] = useState("");
   const [message, setMessage] = useState("");
 
-  useEffect(() => { const raw = localStorage.getItem(STORAGE_KEY); if (raw) setState({ ...JSON.parse(raw), unlocked: false }); setReady(true); }, []);
+  useEffect(() => { const raw = localStorage.getItem(STORAGE_KEY); if (raw) setState({ ...initial, ...JSON.parse(raw), emergency:JSON.parse(raw).emergency||[], unlocked: false }); setReady(true); }, []);
   useEffect(() => { if (ready) localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...state, unlocked: false })); }, [state, ready]);
   useEffect(() => {
     if (!ready || !state.startedAt) return;
@@ -51,11 +61,14 @@ export default function Home() {
     const accepted = state.records.filter(r => r.date === date && r.status === "accepted");
     const total = accepted.filter(r => r.kind === "pushup").reduce((n,r)=>n+(r.amount||0),0);
     const stockProofs = accepted.filter(r => r.kind === "stock" && r.evidenceHash).length;
-    const failures = [total < 100 ? `푸시업 ${total}/100개` : "", stockProofs < 2 ? `주식 증빙 ${stockProofs}/2건` : ""].filter(Boolean);
+    const emergencyFailures=(state.emergency||[]).filter(x=>x.startedAt.slice(0,10)===date&&x.stage==="failed").length;
+    const failures = [total < 100 ? `푸시업 ${total}/100개` : "", stockProofs < 2 ? `주식 증빙 ${stockProofs}/2건` : "", emergencyFailures?`비상 루틴 ${emergencyFailures}회 미완료`:""].filter(Boolean);
     if (!failures.length) return;
     const post: BlogPost = { id:`daily-${date}`, date, title:`${date} 약속 불이행 기록`, published:false, body:`박준영은 정한 기준을 충족하지 못했다. 확인된 미달은 ${failures.join(", ")}이다. 기록되지 않은 노력은 판정에 포함하지 않는다. 원인은 의지가 아니라 마감 전에 행동과 증빙을 배치하지 못한 데 있다. 다음 24시간에는 가장 작은 실행을 먼저 완료하고 즉시 증빙을 잠근다.` };
     setState(s=>({...s,posts:[post,...s.posts],audits:[{id:uid(),at:nowKst(),action:"FAILURE_POST_QUEUED",summary:`${date} 실패 회고 공개 대기`},...s.audits]}));
-  }, [ready, state.startedAt, state.records, state.posts]);
+  }, [ready, state.startedAt, state.records, state.posts, state.emergency]);
+
+  useEffect(()=>{if(!ready)return;const pending=state.emergency.filter(x=>['relax','video'].includes(x.stage));if(!pending.length)return;const next=Math.min(...pending.map(x=>new Date(x.deadlineAt).getTime()));const id=setTimeout(()=>setState(s=>{const now=Date.now();const failed=s.emergency.filter(x=>['relax','video'].includes(x.stage)&&new Date(x.deadlineAt).getTime()<=now);if(!failed.length)return s;return{...s,emergency:s.emergency.map(x=>failed.some(f=>f.id===x.id)?{...x,stage:'failed',failureReason:'시작 후 10분 안에 호흡 증빙 미완료'}:x),audits:[...failed.map(x=>({id:uid(),at:nowKst(),action:'EMERGENCY_FAILED',recordId:x.id,summary:'비상 루틴 10분 마감 초과'})),...s.audits]}}),Math.max(0,next-Date.now())+100);return()=>clearTimeout(id)},[ready,state.emergency]);
 
   const saveRecord = async (record: Omit<RecordItem, "id" | "createdAt" | "status" | "locked">, file?: File) => {
     let evidenceHash = "", evidenceName = "";
@@ -89,9 +102,10 @@ export default function Home() {
 
   return <main className="shell">
     <header><div><p className="eyebrow">박준영의 공개 책임 원장</p><h1>오늘의 약속은 오늘 증명한다.</h1></div><div className="deadline"><span>일일 마감</span><strong>다음 날 03:00</strong></div></header>
-    <nav>{[["today","오늘"],["record","기록"],["review","검토"],["weekly","주간"],["blog","공개 회고"],["audit","감사 로그"]].map(([id,t]) => <button key={id} className={tab===id?"active":""} onClick={() => setTab(id)}>{t}</button>)}</nav>
+    <nav>{[["today","오늘"],["emergency","비상 루틴"],["record","기록"],["review","검토"],["weekly","주간"],["blog","공개 회고"],["audit","감사 로그"]].map(([id,t]) => <button key={id} className={tab===id?"active":""} onClick={() => setTab(id)}>{t}</button>)}</nav>
     {message && <div className="notice" role="status">{message}<button onClick={() => setMessage("")}>닫기</button></div>}
     {tab === "today" && <Today pushups={pushups} stockEvidence={stockEvidence} weekly={weekly} records={state.records} />}
+    {tab === "emergency" && <Emergency sessions={state.emergency} setState={setState} />}
     {tab === "record" && <RecordForms onSave={saveRecord} />}
     {tab === "review" && <Review records={state.records} onReview={review} />}
     {tab === "weekly" && <Weekly weekly={weekly} />}
@@ -105,6 +119,33 @@ function Today({ pushups, stockEvidence, weekly, records }: { pushups:number; st
   const pending = records.filter(r => r.status === "submitted" || r.status === "needs_review").length;
   return <section><div className="hero-grid"><article className="metric primary"><span>푸시업</span><strong>{pushups}<small>/100</small></strong><progress value={pushups} max={100}/><p>{Math.max(0,100-pushups)}개 남음</p></article><article className="metric"><span>주식 증빙</span><strong>{stockEvidence}<small>/2장</small></strong><progress value={stockEvidence} max={2}/><p>주문·체결 + 보유 내역</p></article><article className="metric"><span>검토 대기</span><strong>{pending}<small>건</small></strong><p>불확실한 기록은 성공으로 세지 않습니다.</p></article></div><div className="panel"><div className="section-title"><div><p className="eyebrow">우선순위</p><h2>지금 빠져나갈 구멍</h2></div></div><ol className="risks">{pushups < 100 && <li><b>푸시업 {100-pushups}개 부족</b><span>세트 기록과 증빙을 함께 제출하세요.</span></li>}{stockEvidence < 2 && <li><b>주식 화면 {2-stockEvidence}장 부족</b><span>무매매도 주문·체결 내역으로 증명해야 합니다.</span></li>}{Object.entries(weekly).filter(([p,n])=>n<TARGETS[p]).slice(0,3).map(([p,n])=><li key={p}><b>{p} {TARGETS[p]-n}회 부족</b><span>월요일 오전 3시 이후에는 되돌릴 수 없습니다.</span></li>)}</ol></div></section>;
 }
+
+function Emergency({sessions,setState}:{sessions:EmergencySession[];setState:React.Dispatch<React.SetStateAction<AppState>>}){
+  const active=sessions.find(x=>!['complete','failed'].includes(x.stage));
+  const [task,setTask]=useState(""); const [before,setBefore]=useState<Condition>({focus:"하",tension:"상",noise:"상"});
+  const [after,setAfter]=useState<Condition>({focus:"중",tension:"중",noise:"중"}); const [busy,setBusy]=useState(false); const [result,setResult]=useState("");
+  const update=(id:string,patch:Partial<EmergencySession>,action:string,summary:string)=>setState(s=>({...s,emergency:s.emergency.map(x=>x.id===id?{...x,...patch}:x),audits:[{id:uid(),at:nowKst(),action,recordId:id,summary},...s.audits]}));
+  const start=(e:FormEvent)=>{e.preventDefault();const started=new Date();const item:EmergencySession={id:uid(),startedAt:started.toISOString(),deadlineAt:new Date(started.getTime()+600000).toISOString(),task:task.trim(),before,stage:"relax"};setState(s=>({...s,emergency:[item,...s.emergency],audits:[{id:uid(),at:nowKst(),action:"EMERGENCY_STARTED",recordId:item.id,summary:`비상 루틴 시작 · 고정 업무: ${item.task}`},...s.audits]}));setTask("");};
+  const video=async(file:File)=>{if(!active)return;setBusy(true);setResult("영상 길이와 움직임을 기기 안에서 분석하고 있습니다…");try{const hash=await sha256(await file.arrayBuffer());if(sessions.some(x=>x.videoHash===hash)){setResult("과거와 동일한 영상입니다. 새로 촬영하세요.");return;}const analysis=await analyzeBreathingVideo(file);if(!analysis.pass){setResult(`${analysis.reason} 새 3분 영상을 촬영하세요.`);return;}update(active.id,{stage:"focus",videoHash:hash,videoName:file.name,videoDuration:analysis.duration,visibilityRatio:analysis.coverage,regularity:analysis.regularity},"BREATH_VIDEO_ACCEPTED",`3분 호흡 영상 인정 · 관찰 ${Math.round(analysis.coverage*100)}%`);setResult("영상이 인정되었습니다. 10분 안에 고정한 업무를 시작하세요.");}finally{setBusy(false);}};
+  return <section className="panel emergency"><div className="section-title"><div><p className="eyebrow">CONDITION RESET</p><h2>생각을 늘리지 말고 정한 행동을 실행</h2></div></div>
+    {!active&&<form className="record-form" onSubmit={start}><label>루틴 직후 시작할 업무<input value={task} onChange={e=>setTask(e.target.value)} required minLength={3} placeholder="예: Part 5 오답 10문제 검토"/><small>시작 후 수정·삭제할 수 없습니다.</small></label><ConditionFields value={before} onChange={setBefore}/><button className="submit">비상 루틴 시작</button></form>}
+    {active&&<div className="routine"><div className="routine-head"><div><span className={`pill ${active.stage}`}>{stageLabel(active.stage)}</span><h3>{active.task}</h3></div><Deadline at={active.deadlineAt}/></div>
+      {active.stage==="relax"&&<><div className="protocol"><b>눈을 감고 얕고 편안하게 호흡</b><ol><li>발끝 수축 후 이완 · 5초</li><li>손가락 끝 수축 후 이완 · 5초</li><li>어깨 수축 후 이완 · 5초</li><li>목 수축 후 이완 · 5초</li></ol></div><Timer seconds={20} label="20초 이완" onStart={()=>update(active.id,{relaxStartedAt:new Date().toISOString()},"RELAX_TIMER_STARTED","20초 이완 타이머 시작")} onDone={()=>update(active.id,{stage:"video",relaxCompletedAt:new Date().toISOString()},"RELAX_TIMER_COMPLETED","20초 이완 연속 완료")}/></>}
+      {active.stage==="video"&&<div className="upload-box"><h3>3분 호흡 영상 제출</h3><p>입과 코를 크게 담아 3분 이상 연속 촬영하세요. 영상의 90% 이상에서 중앙 영역의 미세한 반복 움직임이 확인되어야 합니다.</p><input type="file" accept="video/*" disabled={busy} onChange={e=>e.target.files?.[0]&&video(e.target.files[0])}/>{result&&<p role="status">{result}</p>}</div>}
+      {active.stage==="focus"&&<><p className="coach">지금 할 일은 하나뿐입니다: <b>{active.task}</b></p><Timer seconds={600} label="10분 집중" onStart={()=>update(active.id,{focusStartedAt:new Date().toISOString()},"FOCUS_TIMER_STARTED","10분 집중 타이머 시작")} onDone={()=>update(active.id,{stage:"after",focusCompletedAt:new Date().toISOString()},"FOCUS_TIMER_COMPLETED","고정 업무 10분 유지 완료")}/></>}
+      {active.stage==="after"&&<form className="record-form" onSubmit={e=>{e.preventDefault();update(active.id,{stage:"complete",after,completedAt:new Date().toISOString()},"EMERGENCY_COMPLETED","비상 루틴 및 업무 10분 유지 성공");}}><ConditionFields value={after} onChange={setAfter}/><button className="submit">사후 상태 저장하고 완료</button></form>}
+    </div>}
+    <div className="history"><h3>비상 루틴 이력</h3>{!sessions.length?<Empty text="아직 실행 기록이 없습니다."/>:sessions.map(x=><article className="row" key={x.id}><div><span className={`pill ${x.stage}`}>{stageLabel(x.stage)}</span><h3>{x.task}</h3><p>{new Date(x.startedAt).toLocaleString("ko-KR")} · {x.failureReason||conditionSummary(x)}</p></div></article>)}</div>
+  </section>;
+}
+
+function ConditionFields({value,onChange}:{value:Condition;onChange:(v:Condition)=>void}){return <fieldset><legend>현재 상태 (분석용)</legend><div className="three"><LevelField label="집중 가능성" value={value.focus} onChange={v=>onChange({...value,focus:v})}/><LevelField label="신체 긴장" value={value.tension} onChange={v=>onChange({...value,tension:v})}/><LevelField label="정신적 소란" value={value.noise} onChange={v=>onChange({...value,noise:v})}/></div></fieldset>}
+function LevelField({label,value,onChange}:{label:string;value:Level;onChange:(v:Level)=>void}){return <label>{label}<select value={value} onChange={e=>onChange(e.target.value as Level)}><option>상</option><option>중</option><option>하</option></select></label>}
+function Timer({seconds,label,onStart,onDone}:{seconds:number;label:string;onStart:()=>void;onDone:()=>void}){const [end,setEnd]=useState<number>();const [left,setLeft]=useState(seconds);useEffect(()=>{if(!end)return;const tick=()=>{const n=Math.max(0,Math.ceil((end-Date.now())/1000));setLeft(n);if(n===0){setEnd(undefined);onDone();}};tick();const id=setInterval(tick,250);return()=>clearInterval(id);},[end,onDone]);return <div className="timer"><strong>{Math.floor(left/60).toString().padStart(2,"0")}:{(left%60).toString().padStart(2,"0")}</strong><button disabled={!!end} onClick={()=>{const finish=Date.now()+seconds*1000;setLeft(seconds);setEnd(finish);onStart();}}>{end?`${label} 진행 중`:`${label} 시작`}</button><small>일시정지 없이 연속 완료만 인정됩니다.</small></div>}
+function Deadline({at}:{at:string}){const [left,setLeft]=useState(0);useEffect(()=>{const tick=()=>setLeft(Math.max(0,Math.ceil((new Date(at).getTime()-Date.now())/1000)));tick();const id=setInterval(tick,1000);return()=>clearInterval(id)},[at]);return <div className="deadline-box"><small>호흡 증빙 마감</small><b>{Math.floor(left/60).toString().padStart(2,"0")}:{(left%60).toString().padStart(2,"0")}</b></div>}
+function stageLabel(s:EmergencySession['stage']){return ({relax:"20초 이완",video:"영상 검증",focus:"10분 집중",after:"사후 측정",complete:"성공",failed:"실패"})[s]}
+function conditionSummary(x:EmergencySession){return x.after?`집중 ${x.before.focus}→${x.after.focus}, 긴장 ${x.before.tension}→${x.after.tension}, 소란 ${x.before.noise}→${x.after.noise}`:"진행 중"}
+async function analyzeBreathingVideo(file:File):Promise<{pass:boolean;reason:string;duration:number;coverage:number;regularity:number}>{const url=URL.createObjectURL(file);const v=document.createElement('video');v.muted=true;v.src=url;await new Promise<void>((ok,bad)=>{v.onloadedmetadata=()=>ok();v.onerror=()=>bad(new Error('영상을 읽을 수 없습니다.'));});const duration=v.duration;if(!Number.isFinite(duration)||duration<180){URL.revokeObjectURL(url);return{pass:false,reason:'영상이 3분 미만입니다.',duration,coverage:0,regularity:0}}const canvas=document.createElement('canvas');canvas.width=96;canvas.height=96;const ctx=canvas.getContext('2d',{willReadFrequently:true})!;const values:number[]=[];let valid=0;for(let t=0;t<180;t+=5){v.currentTime=t;await new Promise<void>(ok=>v.onseeked=()=>ok());ctx.drawImage(v,0,0,96,96);const d=ctx.getImageData(24,24,48,48).data;let mean=0,variance=0;for(let i=0;i<d.length;i+=4)mean+=(d[i]+d[i+1]+d[i+2])/3;mean/=d.length/4;for(let i=0;i<d.length;i+=4){const g=(d[i]+d[i+1]+d[i+2])/3;variance+=(g-mean)**2}variance/=d.length/4;if(variance>8)valid++;values.push(mean);}URL.revokeObjectURL(url);const coverage=valid/values.length;const delta=values.slice(1).map((x,i)=>Math.abs(x-values[i]));const median=[...delta].sort((a,b)=>a-b)[Math.floor(delta.length/2)]||0;const moving=delta.filter(x=>x>Math.max(.18,median*.45)).length/delta.length;const regularity=Math.min(1,moving/.35);if(coverage<.9)return{pass:false,reason:'코·입 관찰 가능 구간이 90% 미만입니다.',duration,coverage,regularity};if(regularity<.6)return{pass:false,reason:'코·입 주변의 반복적인 미세 움직임이 충분하지 않습니다.',duration,coverage,regularity};return{pass:true,reason:'인정',duration,coverage,regularity}}
 
 function RecordForms({ onSave }: { onSave:(r:Omit<RecordItem,"id"|"createdAt"|"status"|"locked">,f?:File)=>void }) {
   const [kind,setKind]=useState<Kind>("toeic");
