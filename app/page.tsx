@@ -1,7 +1,10 @@
 "use client";
 /* eslint-disable react-hooks/set-state-in-effect */
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { onAuthStateChanged, signInWithPopup, signOut, type User } from "firebase/auth";
+import { doc, getDoc, onSnapshot, serverTimestamp, setDoc } from "firebase/firestore";
+import { auth, db, googleProvider } from "./firebase";
 
 type Kind = "toeic" | "pushup" | "stock";
 type Status = "submitted" | "accepted" | "rejected" | "needs_review";
@@ -17,16 +20,16 @@ type Condition = { focus: Level; tension: Level; noise: Level };
 type EmergencySession = {
   id:string; startedAt:string; deadlineAt:string; task:string; before:Condition; after?:Condition;
   stage:"relax"|"video"|"focus"|"after"|"complete"|"failed";
-  relaxStartedAt?:string; relaxCompletedAt?:string; videoHash?:string; videoName?:string;
+  relaxStartedAt?:string; relaxCompletedAt?:string; videoHash?:string;
   videoDuration?:number; visibilityRatio?:number; regularity?:number; focusStartedAt?:string;
   focusCompletedAt?:string; completedAt?:string; failureReason?:string;
 };
-type AppState = { records: RecordItem[]; audits: Audit[]; posts: BlogPost[]; emergency:EmergencySession[]; pinHash: string; unlocked: boolean; startedAt?: string };
+type AppState = { records: RecordItem[]; audits: Audit[]; posts: BlogPost[]; emergency:EmergencySession[]; startedAt?: string };
 
 const PARTS = ["Part 2", "Part 3", "Part 4", "Part 5", "Part 7", "단어", "실전 모의고사"];
 const TARGETS: Record<string, number> = { "Part 2": 2, "Part 3": 2, "Part 4": 2, "Part 5": 3, "Part 7": 3, "단어": 6, "실전 모의고사": 1 };
 const STORAGE_KEY = "junyoung-referee-v1";
-const initial: AppState = { records: [], audits: [], posts: [], emergency: [], pinHash: "", unlocked: false };
+const initial: AppState = { records: [], audits: [], posts: [], emergency: [] };
 
 function nowKst() { return new Date().toLocaleString("sv-SE", { timeZone: "Asia/Seoul" }).replace(" ", "T"); }
 function kstDate() { return nowKst().slice(0, 10); }
@@ -44,12 +47,87 @@ function withinWeek(r: RecordItem) { const d = new Date(`${r.date}T12:00:00+09:0
 export default function Home() {
   const [state, setState] = useState<AppState>(initial);
   const [ready, setReady] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [syncStatus, setSyncStatus] = useState("로그인 대기");
   const [tab, setTab] = useState("today");
-  const [pin, setPin] = useState("");
   const [message, setMessage] = useState("");
+  const applyingRemote = useRef(false);
+  const lastSerialized = useRef("");
 
-  useEffect(() => { const raw = localStorage.getItem(STORAGE_KEY); if (raw) setState({ ...initial, ...JSON.parse(raw), emergency:JSON.parse(raw).emergency||[], unlocked: false }); setReady(true); }, []);
-  useEffect(() => { if (ready) localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...state, unlocked: false })); }, [state, ready]);
+  useEffect(() => onAuthStateChanged(auth, current => {
+    setUser(current);
+    setAuthReady(true);
+    if (!current) {
+      setReady(false);
+      setState(initial);
+      setSyncStatus("로그인 대기");
+    }
+  }), []);
+
+  useEffect(() => {
+    if (!user) return;
+    const userRef = doc(db, "users", user.uid);
+    let unsubscribe = () => undefined;
+    let cancelled = false;
+
+    (async () => {
+      setSyncStatus("클라우드 불러오는 중");
+      const first = await getDoc(userRef);
+      if (cancelled) return;
+      if (!first.exists()) {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        const legacy = raw ? JSON.parse(raw) : null;
+        const migrated: AppState = legacy ? {
+          records: legacy.records || [], audits: legacy.audits || [], posts: legacy.posts || [],
+          emergency: legacy.emergency || [], startedAt: legacy.startedAt || nowKst(),
+        } : { ...initial, startedAt: nowKst() };
+        await setDoc(userRef, { ...migrated, updatedAt: serverTimestamp() });
+        localStorage.removeItem(STORAGE_KEY);
+      }
+      unsubscribe = onSnapshot(userRef, { includeMetadataChanges: true }, snapshot => {
+        if (!snapshot.exists()) return;
+        const data = snapshot.data();
+        const remote: AppState = {
+          records: data.records || [], audits: data.audits || [], posts: data.posts || [],
+          emergency: data.emergency || [], startedAt: data.startedAt,
+        };
+        const serialized = JSON.stringify(remote);
+        applyingRemote.current = true;
+        lastSerialized.current = serialized;
+        setState(remote);
+        setReady(true);
+        setSyncStatus(snapshot.metadata.hasPendingWrites ? "동기화 중" : snapshot.metadata.fromCache ? "오프라인 캐시" : "동기화 완료");
+        queueMicrotask(() => { applyingRemote.current = false; });
+      }, error => {
+        setMessage(`동기화 오류: ${error.message}`);
+        setSyncStatus("동기화 실패");
+      });
+    })().catch(error => {
+      setMessage(`클라우드를 열 수 없습니다: ${error.message}`);
+      setSyncStatus("연결 실패");
+    });
+
+    return () => { cancelled = true; unsubscribe(); };
+  }, [user]);
+
+  useEffect(() => {
+    if (!user || !ready || applyingRemote.current) return;
+    const serialized = JSON.stringify(state);
+    if (serialized === lastSerialized.current) return;
+    const timer = setTimeout(async () => {
+      setSyncStatus("동기화 중");
+      try {
+        await setDoc(doc(db, "users", user.uid), { ...state, updatedAt: serverTimestamp() });
+        lastSerialized.current = serialized;
+        setSyncStatus("동기화 완료");
+      } catch (error) {
+        setSyncStatus("동기화 실패");
+        setMessage(`저장하지 못했습니다: ${error instanceof Error ? error.message : "알 수 없는 오류"}`);
+      }
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [state, user, ready]);
   useEffect(() => {
     if (!ready || !state.startedAt) return;
     navigator.serviceWorker?.register("/stikK-/sw.js", { scope: "/stikK-/" }).catch(() => undefined);
@@ -90,18 +168,12 @@ export default function Home() {
   const stockEvidence = state.records.filter(r => r.kind === "stock" && r.date === kstDate() && r.evidenceHash).length;
   const weekly = useMemo(() => Object.fromEntries(PARTS.map(p => [p, state.records.filter(r => r.kind === "toeic" && r.status === "accepted" && withinWeek(r) && r.parts?.includes(p)).length])), [state.records]);
 
-  const lock = async (e: FormEvent) => {
-    e.preventDefault(); const hash = await sha256(pin);
-    if (!state.pinHash) setState(s => ({ ...s, pinHash: hash, unlocked: true, startedAt: nowKst() }));
-    else if (hash === state.pinHash) setState(s => ({ ...s, unlocked: true })); else setMessage("PIN이 일치하지 않습니다.");
-    setPin("");
-  };
-
-  if (!ready) return <main className="loading">기록 원장을 여는 중…</main>;
-  if (!state.unlocked) return <main className="lock-screen"><section className="lock-card"><p className="eyebrow">JUNYOUNG REFEREE</p><h1>핑계보다 먼저 남는 기록</h1><p>이 기기의 기록은 로컬에 저장되며, 확정된 기록과 감사 로그는 앱에서 삭제할 수 없습니다.</p><form onSubmit={lock}><label>{state.pinHash ? "로컬 PIN" : "처음 사용할 PIN 만들기"}<input type="password" minLength={4} required value={pin} onChange={e => setPin(e.target.value)} inputMode="numeric" /></label><button>{state.pinHash ? "원장 열기" : "PIN 고정하기"}</button></form></section></main>;
+  if (!authReady) return <main className="loading">로그인 상태 확인 중…</main>;
+  if (!user) return <main className="lock-screen"><section className="lock-card"><p className="eyebrow">JUNYOUNG REFEREE</p><h1>모든 기기에서 같은 책임 원장</h1><p>같은 Google 계정으로 로그인하면 기록과 판정 결과가 자동으로 동기화됩니다. 증빙 영상 원본은 업로드하거나 저장하지 않습니다.</p><button onClick={() => signInWithPopup(auth, googleProvider).catch(error => setMessage(`로그인 실패: ${error.message}`))}>Google로 로그인</button>{message && <p role="status">{message}</p>}</section></main>;
+  if (!ready) return <main className="loading">클라우드 기록을 여는 중…</main>;
 
   return <main className="shell">
-    <header><div><p className="eyebrow">박준영의 공개 책임 원장</p><h1>오늘의 약속은 오늘 증명한다.</h1></div><div className="deadline"><span>일일 마감</span><strong>다음 날 03:00</strong></div></header>
+    <header><div><p className="eyebrow">박준영의 공개 책임 원장</p><h1>오늘의 약속은 오늘 증명한다.</h1><small>{user.email} · {syncStatus}</small></div><div className="deadline"><span>일일 마감</span><strong>다음 날 03:00</strong><button onClick={() => signOut(auth)}>로그아웃</button></div></header>
     <nav>{[["today","오늘"],["emergency","비상 루틴"],["record","기록"],["review","검토"],["weekly","주간"],["blog","공개 회고"],["audit","감사 로그"]].map(([id,t]) => <button key={id} className={tab===id?"active":""} onClick={() => setTab(id)}>{t}</button>)}</nav>
     {message && <div className="notice" role="status">{message}<button onClick={() => setMessage("")}>닫기</button></div>}
     {tab === "today" && <Today pushups={pushups} stockEvidence={stockEvidence} weekly={weekly} records={state.records} />}
@@ -126,12 +198,12 @@ function Emergency({sessions,setState}:{sessions:EmergencySession[];setState:Rea
   const [after,setAfter]=useState<Condition>({focus:"중",tension:"중",noise:"중"}); const [busy,setBusy]=useState(false); const [result,setResult]=useState("");
   const update=(id:string,patch:Partial<EmergencySession>,action:string,summary:string)=>setState(s=>({...s,emergency:s.emergency.map(x=>x.id===id?{...x,...patch}:x),audits:[{id:uid(),at:nowKst(),action,recordId:id,summary},...s.audits]}));
   const start=(e:FormEvent)=>{e.preventDefault();const started=new Date();const item:EmergencySession={id:uid(),startedAt:started.toISOString(),deadlineAt:new Date(started.getTime()+600000).toISOString(),task:task.trim(),before,stage:"relax"};setState(s=>({...s,emergency:[item,...s.emergency],audits:[{id:uid(),at:nowKst(),action:"EMERGENCY_STARTED",recordId:item.id,summary:`비상 루틴 시작 · 고정 업무: ${item.task}`},...s.audits]}));setTask("");};
-  const video=async(file:File)=>{if(!active)return;setBusy(true);setResult("영상 길이와 움직임을 기기 안에서 분석하고 있습니다…");try{const hash=await sha256(await file.arrayBuffer());if(sessions.some(x=>x.videoHash===hash)){setResult("과거와 동일한 영상입니다. 새로 촬영하세요.");return;}const analysis=await analyzeBreathingVideo(file);if(!analysis.pass){setResult(`${analysis.reason} 새 3분 영상을 촬영하세요.`);return;}update(active.id,{stage:"focus",videoHash:hash,videoName:file.name,videoDuration:analysis.duration,visibilityRatio:analysis.coverage,regularity:analysis.regularity},"BREATH_VIDEO_ACCEPTED",`3분 호흡 영상 인정 · 관찰 ${Math.round(analysis.coverage*100)}%`);setResult("영상이 인정되었습니다. 10분 안에 고정한 업무를 시작하세요.");}finally{setBusy(false);}};
+  const video=async(file:File)=>{if(!active)return;setBusy(true);setResult("영상 길이와 움직임을 기기 안에서 분석하고 있습니다…");try{const hash=await sha256(await file.arrayBuffer());if(sessions.some(x=>x.videoHash===hash)){setResult("과거와 동일한 영상입니다. 새로 촬영하세요.");return;}const analysis=await analyzeBreathingVideo(file);if(!analysis.pass){setResult(`${analysis.reason} 새 3분 영상을 촬영하세요.`);return;}update(active.id,{stage:"focus",videoHash:hash,videoDuration:analysis.duration,visibilityRatio:analysis.coverage,regularity:analysis.regularity},"BREATH_VIDEO_ACCEPTED",`3분 호흡 영상 인정 · 관찰 ${Math.round(analysis.coverage*100)}% · 원본 즉시 폐기`);setResult("영상이 인정되었습니다. 원본은 저장하지 않고 폐기했습니다. 10분 안에 고정한 업무를 시작하세요.");}finally{setBusy(false);}};
   return <section className="panel emergency"><div className="section-title"><div><p className="eyebrow">CONDITION RESET</p><h2>생각을 늘리지 말고 정한 행동을 실행</h2></div></div>
     {!active&&<form className="record-form" onSubmit={start}><label>루틴 직후 시작할 업무<input value={task} onChange={e=>setTask(e.target.value)} required minLength={3} placeholder="예: Part 5 오답 10문제 검토"/><small>시작 후 수정·삭제할 수 없습니다.</small></label><ConditionFields value={before} onChange={setBefore}/><button className="submit">비상 루틴 시작</button></form>}
     {active&&<div className="routine"><div className="routine-head"><div><span className={`pill ${active.stage}`}>{stageLabel(active.stage)}</span><h3>{active.task}</h3></div><Deadline at={active.deadlineAt}/></div>
       {active.stage==="relax"&&<><div className="protocol"><b>눈을 감고 얕고 편안하게 호흡</b><ol><li>발끝 수축 후 이완 · 5초</li><li>손가락 끝 수축 후 이완 · 5초</li><li>어깨 수축 후 이완 · 5초</li><li>목 수축 후 이완 · 5초</li></ol></div><Timer seconds={20} label="20초 이완" startedAt={active.relaxStartedAt} onStart={()=>update(active.id,{relaxStartedAt:new Date().toISOString()},"RELAX_TIMER_STARTED","20초 이완 타이머 시작")} onDone={()=>update(active.id,{stage:"video",relaxCompletedAt:new Date().toISOString()},"RELAX_TIMER_COMPLETED","20초 이완 연속 완료")}/></>}
-      {active.stage==="video"&&<div className="upload-box"><h3>3분 호흡 영상 제출</h3><p>입과 코를 크게 담아 3분 이상 연속 촬영하세요. 영상의 90% 이상에서 중앙 영역의 미세한 반복 움직임이 확인되어야 합니다.</p><input type="file" accept="video/*" disabled={busy} onChange={e=>e.target.files?.[0]&&video(e.target.files[0])}/>{result&&<p role="status">{result}</p>}</div>}
+      {active.stage==="video"&&<div className="upload-box"><h3>3분 호흡 영상 확인</h3><p>입과 코를 크게 담아 3분 이상 연속 촬영하세요. 브라우저 안에서만 판정하며 원본 영상은 업로드·저장하지 않고 확인 직후 폐기합니다.</p><input type="file" accept="video/*" disabled={busy} onChange={e=>{const input=e.currentTarget;const file=input.files?.[0];if(file)video(file).finally(()=>{input.value="";});}}/>{result&&<p role="status">{result}</p>}</div>}
       {active.stage==="focus"&&<><p className="coach">지금 할 일은 하나뿐입니다: <b>{active.task}</b></p><Timer seconds={600} label="10분 집중" startedAt={active.focusStartedAt} onStart={()=>update(active.id,{focusStartedAt:new Date().toISOString()},"FOCUS_TIMER_STARTED","10분 집중 타이머 시작")} onDone={()=>update(active.id,{stage:"after",focusCompletedAt:new Date().toISOString()},"FOCUS_TIMER_COMPLETED","고정 업무 10분 유지 완료")}/></>}
       {active.stage==="after"&&<form className="record-form" onSubmit={e=>{e.preventDefault();update(active.id,{stage:"complete",after,completedAt:new Date().toISOString()},"EMERGENCY_COMPLETED","비상 루틴 및 업무 10분 유지 성공");}}><ConditionFields value={after} onChange={setAfter}/><button className="submit">사후 상태 저장하고 완료</button></form>}
     </div>}
