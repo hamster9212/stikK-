@@ -130,7 +130,7 @@ export default function Home() {
   }, [state, user, ready]);
   useEffect(() => {
     if (!ready || !state.startedAt) return;
-    navigator.serviceWorker?.register("/stikK-/sw.js", { scope: "/stikK-/" }).catch(() => undefined);
+    navigator.serviceWorker?.register(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL }).catch(() => undefined);
     const current = new Date();
     if (current.getHours() < 3) return;
     const previous = new Date(current); previous.setDate(previous.getDate() - 1);
