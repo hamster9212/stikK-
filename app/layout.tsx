@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "박준영의 책임 원장",
-  description: "토익·푸시업·주식 계획의 증빙과 실패를 숨김없이 기록하는 로컬 우선 Referee",
+  description: "푸시업·윗몸일으키기·주식 계획의 증빙과 실패를 숨김없이 기록하는 책임 원장",
   manifest: "/stikK-/manifest.webmanifest",
 };
 
